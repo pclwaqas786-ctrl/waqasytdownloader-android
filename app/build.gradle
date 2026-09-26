@@ -1,0 +1,37 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+    id 'com.chaquo.python'
+}
+
+android {
+    namespace 'com.waqas.ytdownloader'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.waqas.ytdownloader'
+        minSdk 29
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+        ndk { abiFilters 'arm64-v8a', 'armeabi-v7a' }
+    }
+    buildTypes {
+        release { minifyEnabled false }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = '17' }
+}
+
+chaquopy {
+    defaultConfig {
+        version '3.11'
+        pip { install 'yt-dlp' }
+    }
+}
+
+dependencies {
+}
