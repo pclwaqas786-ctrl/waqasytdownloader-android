@@ -2,6 +2,7 @@
 video = best single-file (audio+video) mp4, audio = m4a direct."""
 import json
 import os
+import time
 import yt_dlp
 
 ALLOWED_HOSTS = {
@@ -27,10 +28,37 @@ def _base_opts():
     }
 
 
+def _host_of(url):
+    try:
+        return (url or "").split("/")[2].lower()
+    except Exception:
+        return ""
+
+
+def _is_tiktok(url):
+    return "tiktok" in _host_of(url)
+
+
+def _extract_with_retry(ydl, url, attempts=3):
+    """TikTok often refuses one request and allows the next; retry transient failures."""
+    last = None
+    for i in range(attempts):
+        try:
+            return ydl.extract_info(url, download=False)
+        except Exception as e:
+            last = e
+            if i < attempts - 1:
+                time.sleep(3)
+    raise last
+
+
 def fetch_info(url):
     try:
         with yt_dlp.YoutubeDL(_base_opts()) as ydl:
-            info = ydl.extract_info(url, download=False)
+            if _is_tiktok(url):
+                info = _extract_with_retry(ydl, url)
+            else:
+                info = ydl.extract_info(url, download=False)
     except Exception as e:
         return json.dumps({"ok": False, "error": str(e)[:300]})
     if (info.get("duration") or 0) > MAX_DURATION:
@@ -86,6 +114,21 @@ def download(url, page_url, format_id, outdir, cb):
         opts["format"] = "bestaudio[ext=m4a]/bestaudio/best"
     else:
         opts["format"] = format_id
+    target = page_url or url
     with yt_dlp.YoutubeDL(opts) as ydl:
-        ydl.download([page_url or url])
+        if _is_tiktok(target):
+            last = None
+            for i in range(3):
+                try:
+                    ydl.download([target])
+                    last = None
+                    break
+                except Exception as e:
+                    last = e
+                    if i < 2:
+                        time.sleep(3)
+            if last is not None:
+                raise last
+        else:
+            ydl.download([target])
     return "done"
