@@ -39,6 +39,11 @@ def _is_tiktok(url):
     return "tiktok" in _host_of(url)
 
 
+def _is_linkedin(url):
+    h = _host_of(url)
+    return "linkedin" in h or "lnkd.in" in h
+
+
 def _extract_with_retry(ydl, url, attempts=3):
     """TikTok often refuses one request and allows the next; retry transient failures."""
     last = None
@@ -64,30 +69,50 @@ def fetch_info(url):
     if (info.get("duration") or 0) > MAX_DURATION:
         return json.dumps({"ok": False, "error": "Video 60 minute se lambi hai."})
 
-    # single-file formats only (video+audio together, no merge needed)
-    cands = [f for f in (info.get("formats") or [])
-             if f.get("vcodec") not in (None, "none")
-             and f.get("acodec") not in (None, "none")]
-    cands.sort(key=lambda f: (f.get("height") or 0), reverse=True)
+    if _is_linkedin(url):
+        # LinkedIn serves progressive MP4s without vcodec/acodec metadata;
+        # treat them as single-file video candidates, labeled by bitrate.
+        cands = [f for f in (info.get("formats") or []) if f.get("url")]
+        cands.sort(key=lambda f: (f.get("tbr") or 0), reverse=True)
+        formats = []
+        seen = set()
+        for f in cands:
+            tbr = int(f.get("tbr") or 0)
+            if tbr in seen:
+                continue
+            seen.add(tbr)
+            formats.append({"id": str(f.get("format_id")),
+                            "label": "Video (%dk)" % tbr if tbr else "Video"})
+            if len(formats) >= 6:
+                break
+        if formats:
+            formats.insert(0, {"id": formats[0]["id"], "label": "Best quality"})
+        # LinkedIn has no separate audio streams; skip the audio-only option.
+    else:
+        # single-file formats only (video+audio together, no merge needed)
+        cands = [f for f in (info.get("formats") or [])
+                 if f.get("vcodec") not in (None, "none")
+                 and f.get("acodec") not in (None, "none")]
+        cands.sort(key=lambda f: (f.get("height") or 0), reverse=True)
 
-    formats = []
-    seen = set()
-    for f in cands:
-        h = f.get("height")
-        if not h or h in seen:
-            continue
-        seen.add(h)
-        formats.append({"id": f["format_id"], "label": "%dp Video" % h})
-        if len(formats) >= 6:
-            break
-    if formats:
-        formats.insert(0, {"id": formats[0]["id"], "label": "Best quality"})
-    formats.append({"id": "__audio__", "label": "Audio only (M4A)"})
+        formats = []
+        seen = set()
+        for f in cands:
+            h = f.get("height")
+            if not h or h in seen:
+                continue
+            seen.add(h)
+            formats.append({"id": f["format_id"], "label": "%dp Video" % h})
+            if len(formats) >= 6:
+                break
+        if formats:
+            formats.insert(0, {"id": formats[0]["id"], "label": "Best quality"})
+        formats.append({"id": "__audio__", "label": "Audio only (M4A)"})
 
     return json.dumps({
         "ok": True,
         "title": info.get("title"),
-        "uploader": info.get("uploader"),
+        "uploader": info.get("uploader") or "",
         "duration": info.get("duration"),
         "thumbnail": info.get("thumbnail"),
         "page_url": info.get("webpage_url") or url,
