@@ -10,7 +10,7 @@ ALLOWED_HOSTS = {
     "instagram.com", "www.instagram.com",
     "tiktok.com", "www.tiktok.com", "vm.tiktok.com", "vt.tiktok.com",
     "facebook.com", "www.facebook.com", "m.facebook.com", "fb.watch",
-    "linkedin.com", "www.linkedin.com",
+    "linkedin.com", "www.linkedin.com", "lnkd.in",
     "x.com", "www.x.com", "twitter.com", "www.twitter.com",
     "vimeo.com", "www.vimeo.com",
 }
