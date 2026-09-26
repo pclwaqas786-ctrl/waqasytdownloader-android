@@ -86,6 +86,6 @@ def download(url, page_url, format_id, outdir, cb):
         opts["format"] = "bestaudio[ext=m4a]/bestaudio/best"
     else:
         opts["format"] = format_id
-    with yt_dlp.YouTubeDL(opts) as ydl:
+    with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([page_url or url])
     return "done"
