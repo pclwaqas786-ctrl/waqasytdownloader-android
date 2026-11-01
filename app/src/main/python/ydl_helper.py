@@ -29,8 +29,10 @@ def _base_opts():
         # formats=missing_pot: YouTube now demands a PO Token for video streams;
         # the phone cannot mint one, so yt-dlp would silently DROP every video
         # format (only audio survived). This keeps them - URLs usually still work.
+        # android_vr first: it still serves the full 144p-4K ladder while the
+        # plain android client is now crippled to a handful of formats.
         "extractor_args": {"youtube": {
-            "player_client": ["android", "web", "tv_samsung", "web_safari"],
+            "player_client": ["android_vr", "android", "web"],
             "formats": ["missing_pot"],
         }},
     }
@@ -142,6 +144,16 @@ def fetch_info(url):
         formats.extend(_dash_options(info.get("formats") or [], skip_upto=top_prog))
         formats.append({"id": "__audio__", "label": "Audio only (M4A)"})
 
+    fmts_all = info.get("formats") or []
+    n_prog = sum(1 for f in fmts_all
+                 if f.get("vcodec") not in (None, "none") and f.get("acodec") not in (None, "none"))
+    n_vonly = sum(1 for f in fmts_all
+                  if f.get("vcodec") not in (None, "none") and f.get("acodec") in (None, "none"))
+    n_aonly = sum(1 for f in fmts_all
+                  if f.get("acodec") not in (None, "none") and f.get("vcodec") in (None, "none"))
+    dbg = "kul %d | video+audio %d | sirf-video %d | sirf-audio %d" % (
+        len(fmts_all), n_prog, n_vonly, n_aonly)
+
     return json.dumps({
         "ok": True,
         "title": info.get("title"),
@@ -150,6 +162,7 @@ def fetch_info(url):
         "thumbnail": info.get("thumbnail"),
         "page_url": info.get("webpage_url") or url,
         "formats": formats,
+        "dbg": dbg,
     })
 
 

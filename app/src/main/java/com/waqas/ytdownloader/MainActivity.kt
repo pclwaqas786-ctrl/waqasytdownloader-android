@@ -98,7 +98,13 @@ class MainActivity : Activity() {
                 spinner.adapter = adapter
                 spinner.visibility = View.VISIBLE
                 findViewById<Button>(R.id.dlBtn).visibility = View.VISIBLE
-                setStatus("")
+                // Diagnostic: if no video option came back, show raw counts
+                // so the real cause is visible instead of guessing.
+                if (formats.size <= 1) {
+                    setStatus("Formats nahi mile. " + obj.optString("dbg"))
+                } else {
+                    setStatus("")
+                }
             }
         } catch (e: Exception) {
             runOnUiThread { setStatus("Error: ${e.message}") }
