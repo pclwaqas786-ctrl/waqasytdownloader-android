@@ -68,24 +68,41 @@ def _extract_with_retry(ydl, url, attempts=3):
 
 
 def _dash_options(fmts, skip_upto=0):
-    """DASH fallback options: avc1/mp4 video-only heights joined on-device
-    with m4a audio via Android MediaMuxer. skip_upto: don't repeat heights
-    already offered as single-file."""
-    has_audio = any(
-        f.get("acodec") not in (None, "none")
-        and f.get("vcodec") in (None, "none")
-        and (f.get("ext") == "m4a" or (f.get("acodec") or "").startswith("mp4a"))
-        for f in fmts)
-    if not has_audio:
-        return []
-    heights = set()
+    """DASH fallback options: separate video+audio joined on-device via
+    Android MediaMuxer (no ffmpeg). Two mux pairs:
+      mp4  = avc1/mp4 video + m4a audio  -> .mp4
+      webm = vp9/webm video + opus audio -> .webm
+    skip_upto: don't repeat heights already offered as single-file."""
+    audios = set()
     for f in fmts:
-        h = f.get("height") or 0
-        if (h > skip_upto and (f.get("vcodec") or "").startswith("avc")
-                and f.get("acodec") in (None, "none") and f.get("ext") == "mp4"):
-            heights.add(h)
-    return [{"id": "__dash__%d" % h, "label": "%dp Video (HD)" % h}
-            for h in sorted(heights, reverse=True)[:4]]
+        if f.get("vcodec") in (None, "none") and f.get("acodec") not in (None, "none"):
+            ac = f.get("acodec") or ""
+            if f.get("ext") == "m4a" or ac.startswith("mp4a"):
+                audios.add("mp4")
+            if f.get("ext") == "webm" or ac.startswith("opus"):
+                audios.add("webm")
+
+    def heights_for(vprefix, ext):
+        hs = set()
+        for f in fmts:
+            h = f.get("height") or 0
+            if (h > skip_upto and (f.get("vcodec") or "").startswith(vprefix)
+                    and f.get("acodec") in (None, "none") and f.get("ext") == ext):
+                hs.add(h)
+        return hs
+
+    out = []
+    labels = set()
+    if "mp4" in audios:
+        for h in sorted(heights_for("avc", "mp4"), reverse=True)[:4]:
+            out.append({"id": "__dash__%d" % h, "label": "%dp Video (HD)" % h})
+            labels.add(h)
+    if "webm" in audios:
+        for h in sorted(heights_for("vp9", "webm"), reverse=True)[:4]:
+            if h not in labels:
+                out.append({"id": "__dashw__%d" % h, "label": "%dp Video (HD)" % h})
+                labels.add(h)
+    return out
 
 
 def fetch_info(url):
@@ -147,12 +164,17 @@ def fetch_info(url):
     fmts_all = info.get("formats") or []
     n_prog = sum(1 for f in fmts_all
                  if f.get("vcodec") not in (None, "none") and f.get("acodec") not in (None, "none"))
-    n_vonly = sum(1 for f in fmts_all
-                  if f.get("vcodec") not in (None, "none") and f.get("acodec") in (None, "none"))
+    vcodecs = {}
+    for f in fmts_all:
+        if f.get("vcodec") not in (None, "none") and f.get("acodec") in (None, "none"):
+            vc = (f.get("vcodec") or "").split(".")[0][:4]
+            vcodecs[vc] = vcodecs.get(vc, 0) + 1
     n_aonly = sum(1 for f in fmts_all
                   if f.get("acodec") not in (None, "none") and f.get("vcodec") in (None, "none"))
-    dbg = "kul %d | video+audio %d | sirf-video %d | sirf-audio %d" % (
-        len(fmts_all), n_prog, n_vonly, n_aonly)
+    dbg = "kul %d | video+audio %d | sirf-video %d%s | sirf-audio %d" % (
+        len(fmts_all), n_prog, sum(vcodecs.values()),
+        ("(%s)" % ",".join("%s:%d" % kv for kv in sorted(vcodecs.items())) if vcodecs else ""),
+        n_aonly)
 
     return json.dumps({
         "ok": True,
@@ -184,7 +206,7 @@ def _run_download(ydl_opts, target, retry):
             ydl.download([target])
 
 
-def _download_dash(base_opts, target, outdir, height, cb, retry):
+def _download_dash(base_opts, target, outdir, height, cb, retry, mux="mp4"):
     def hook(d):
         if d.get("status") == "downloading":
             try:
@@ -193,25 +215,26 @@ def _download_dash(base_opts, target, outdir, height, cb, retry):
             except Exception:
                 pass
 
-    vfile = os.path.join(outdir, "video_part.mp4")
-    afile = os.path.join(outdir, "audio_part.m4a")
+    if mux == "webm":
+        vfile = os.path.join(outdir, "video_part.webm")
+        afile = os.path.join(outdir, "audio_part.webm")
+        vfmt = ("bv*[vcodec^=vp9][ext=webm][height<=%d]/"
+                "bv*[height<=%d][ext=webm]") % (height, height)
+        afmt = "ba[ext=webm]/ba[acodec^=opus]/bestaudio"
+    else:
+        vfile = os.path.join(outdir, "video_part.mp4")
+        afile = os.path.join(outdir, "audio_part.m4a")
+        vfmt = ("bv*[vcodec^=avc][ext=mp4][height<=%d]/"
+                "bv*[height<=%d][ext=mp4]/bv[height<=%d]") % (height, height, height)
+        afmt = "ba[ext=m4a]/ba[acodec^=mp4a]/bestaudio"
     vopts = dict(base_opts)
-    vopts.update({
-        "format": ("bv*[vcodec^=avc][ext=mp4][height<=%d]/"
-                   "bv*[height<=%d][ext=mp4]/bv[height<=%d]") % (height, height, height),
-        "outtmpl": vfile,
-        "progress_hooks": [hook],
-    })
+    vopts.update({"format": vfmt, "outtmpl": vfile, "progress_hooks": [hook]})
     aopts = dict(base_opts)
-    aopts.update({
-        "format": "ba[ext=m4a]/ba[acodec^=mp4a]/bestaudio",
-        "outtmpl": afile,
-        "progress_hooks": [hook],
-    })
+    aopts.update({"format": afmt, "outtmpl": afile, "progress_hooks": [hook]})
     _run_download(vopts, target, retry)
     _run_download(aopts, target, retry)
     # Kotlin joins the two parts with Android MediaMuxer (no ffmpeg)
-    return "dash:%s|%s" % (vfile, afile)
+    return "mux:%s:%s|%s" % (mux, vfile, afile)
 
 
 def download(url, page_url, format_id, outdir, cb):
@@ -235,9 +258,12 @@ def download(url, page_url, format_id, outdir, cb):
         opts["format"] = "bestaudio[ext=m4a]/bestaudio/best"
         _run_download(opts, target, retry)
         return "done"
+    elif format_id.startswith("__dashw__"):
+        height = int(format_id.split("__")[2])
+        return _download_dash(_base_opts(), target, outdir, height, cb, retry, mux="webm")
     elif format_id.startswith("__dash__"):
         height = int(format_id.split("__")[2])
-        return _download_dash(_base_opts(), target, outdir, height, cb, retry)
+        return _download_dash(_base_opts(), target, outdir, height, cb, retry, mux="mp4")
     else:
         opts["format"] = format_id
         _run_download(opts, target, retry)

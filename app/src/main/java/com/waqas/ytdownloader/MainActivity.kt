@@ -126,11 +126,15 @@ class MainActivity : Activity() {
             val result = Python.getInstance().getModule("ydl_helper").callAttr(
                 "download", url, pageUrl, f.id, outdir.absolutePath, ProgressCb(this)
             ).toString()
-            val file: File = if (result.startsWith("dash:")) {
-                val parts = result.removePrefix("dash:").split("|")
+            val file: File = if (result.startsWith("mux:")) {
+                // mux:<mp4|webm>:<video path>|<audio path>
+                val rest = result.removePrefix("mux:")
+                val muxType = rest.substringBefore(":")
+                val paths = rest.substringAfter(":").split("|")
                 runOnUiThread { setStatus("Video+audio jor raha hun...") }
-                val merged = File(outdir, "video_${System.currentTimeMillis()}.mp4")
-                muxVideoAudio(parts[0], parts[1], merged.absolutePath)
+                val ext = if (muxType == "webm") "webm" else "mp4"
+                val merged = File(outdir, "video_${System.currentTimeMillis()}.$ext")
+                muxVideoAudio(paths[0], paths[1], merged.absolutePath, muxType)
                 merged
             } else {
                 outdir.listFiles()?.firstOrNull { it.isFile }
@@ -149,7 +153,11 @@ class MainActivity : Activity() {
     }
 
     private fun saveToDownloads(file: File) {
-        val mime = if (file.extension.equals("m4a", true)) "audio/mp4" else "video/mp4"
+        val mime = when {
+            file.extension.equals("m4a", true) -> "audio/mp4"
+            file.extension.equals("webm", true) -> "video/webm"
+            else -> "video/mp4"
+        }
         val values = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, file.name)
             put(MediaStore.Downloads.MIME_TYPE, mime)
@@ -203,11 +211,15 @@ class MainActivity : Activity() {
         }
     }
 
-    /** Join DASH video+audio parts into one MP4 using Android's built-in
-     *  MediaMuxer — no ffmpeg needed. */
-    private fun muxVideoAudio(videoPath: String, audioPath: String, outPath: String) {
-        val muxer = android.media.MediaMuxer(
-            outPath, android.media.MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+    /** Join DASH video+audio parts into one file using Android's built-in
+     *  MediaMuxer — no ffmpeg needed. muxType "webm" for vp9+opus. */
+    private fun muxVideoAudio(videoPath: String, audioPath: String, outPath: String,
+                              muxType: String = "mp4") {
+        val outFormat = if (muxType == "webm")
+            android.media.MediaMuxer.OutputFormat.MUXER_OUTPUT_WEBM
+        else
+            android.media.MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
+        val muxer = android.media.MediaMuxer(outPath, outFormat)
         val vEx = android.media.MediaExtractor().apply { setDataSource(videoPath) }
         val aEx = android.media.MediaExtractor().apply { setDataSource(audioPath) }
         try {
