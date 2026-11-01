@@ -26,7 +26,13 @@ def _base_opts():
         "no_warnings": True,
         "noplaylist": True,
         "socket_timeout": 30,
-        "extractor_args": {"youtube": {"player_client": ["android", "web", "tv_samsung", "web_safari"]}},
+        # formats=missing_pot: YouTube now demands a PO Token for video streams;
+        # the phone cannot mint one, so yt-dlp would silently DROP every video
+        # format (only audio survived). This keeps them - URLs usually still work.
+        "extractor_args": {"youtube": {
+            "player_client": ["android", "web", "tv_samsung", "web_safari"],
+            "formats": ["missing_pot"],
+        }},
     }
 
 
