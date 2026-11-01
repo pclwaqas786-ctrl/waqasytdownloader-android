@@ -31,8 +31,9 @@ def _base_opts():
         # format (only audio survived). This keeps them - URLs usually still work.
         # android_vr first: it still serves the full 144p-4K ladder while the
         # plain android client is now crippled to a handful of formats.
+        # web_safari: its HLS formats don't need a GVS PO Token.
         "extractor_args": {"youtube": {
-            "player_client": ["android_vr", "android", "web"],
+            "player_client": ["android_vr", "android", "web", "web_safari"],
             "formats": ["missing_pot"],
         }},
     }
@@ -82,25 +83,35 @@ def _dash_options(fmts, skip_upto=0):
             if f.get("ext") == "webm" or ac.startswith("opus"):
                 audios.add("webm")
 
-    def heights_for(vprefix, ext):
-        hs = set()
+    def best_vonly(vprefixes, ext):
+        # best (highest tbr) video-only format_id per height -> {height: itag}
+        best = {}
         for f in fmts:
             h = f.get("height") or 0
-            if (h > skip_upto and (f.get("vcodec") or "").startswith(vprefix)
-                    and f.get("acodec") in (None, "none") and f.get("ext") == ext):
-                hs.add(h)
-        return hs
+            vc = f.get("vcodec") or ""
+            if (h > skip_upto and vc.startswith(vprefixes)
+                    and f.get("acodec") in (None, "none") and f.get("ext") == ext
+                    and f.get("url")):
+                tbr = f.get("tbr") or 0
+                if h not in best or tbr > (best[h][1] or 0):
+                    best[h] = (str(f.get("format_id")), tbr)
+        return {h: itag for h, (itag, _) in best.items()}
 
     out = []
     labels = set()
+    mp4cand = best_vonly(("avc", "avc1"), "mp4")
     if "mp4" in audios:
-        for h in sorted(heights_for("avc", "mp4"), reverse=True)[:4]:
-            out.append({"id": "__dash__%d" % h, "label": "%dp Video (HD)" % h})
+        for h in sorted(mp4cand, reverse=True)[:4]:
+            out.append({"id": "__dashm__%s" % mp4cand[h],
+                        "label": "%dp Video (HD)" % h})
             labels.add(h)
     if "webm" in audios:
-        for h in sorted(heights_for("vp9", "webm"), reverse=True)[:4]:
+        # YouTube reports vp9 as "vp09.00.10.08" - match both spellings
+        webmcand = best_vonly(("vp9", "vp09"), "webm")
+        for h in sorted(webmcand, reverse=True)[:4]:
             if h not in labels:
-                out.append({"id": "__dashw__%d" % h, "label": "%dp Video (HD)" % h})
+                out.append({"id": "__dashw__%s" % webmcand[h],
+                            "label": "%dp Video (HD)" % h})
                 labels.add(h)
     return out
 
@@ -171,10 +182,16 @@ def fetch_info(url):
             vcodecs[vc] = vcodecs.get(vc, 0) + 1
     n_aonly = sum(1 for f in fmts_all
                   if f.get("acodec") not in (None, "none") and f.get("vcodec") in (None, "none"))
-    dbg = "kul %d | video+audio %d | sirf-video %d%s | sirf-audio %d" % (
+    acodecs = {}
+    for f in fmts_all:
+        if f.get("acodec") not in (None, "none") and f.get("vcodec") in (None, "none"):
+            ac = (f.get("acodec") or "").split(".")[0][:4]
+            acodecs[ac] = acodecs.get(ac, 0) + 1
+    dbg = "kul %d | video+audio %d | sirf-video %d%s | sirf-audio %d%s" % (
         len(fmts_all), n_prog, sum(vcodecs.values()),
         ("(%s)" % ",".join("%s:%d" % kv for kv in sorted(vcodecs.items())) if vcodecs else ""),
-        n_aonly)
+        n_aonly,
+        ("(%s)" % ",".join("%s:%d" % kv for kv in sorted(acodecs.items())) if acodecs else ""))
 
     return json.dumps({
         "ok": True,
@@ -206,7 +223,7 @@ def _run_download(ydl_opts, target, retry):
             ydl.download([target])
 
 
-def _download_dash(base_opts, target, outdir, height, cb, retry, mux="mp4"):
+def _download_dash(base_opts, target, outdir, video_itag, cb, retry, mux="mp4"):
     def hook(d):
         if d.get("status") == "downloading":
             try:
@@ -218,17 +235,14 @@ def _download_dash(base_opts, target, outdir, height, cb, retry, mux="mp4"):
     if mux == "webm":
         vfile = os.path.join(outdir, "video_part.webm")
         afile = os.path.join(outdir, "audio_part.webm")
-        vfmt = ("bv*[vcodec^=vp9][ext=webm][height<=%d]/"
-                "bv*[height<=%d][ext=webm]") % (height, height)
         afmt = "ba[ext=webm]/ba[acodec^=opus]/bestaudio"
     else:
         vfile = os.path.join(outdir, "video_part.mp4")
         afile = os.path.join(outdir, "audio_part.m4a")
-        vfmt = ("bv*[vcodec^=avc][ext=mp4][height<=%d]/"
-                "bv*[height<=%d][ext=mp4]/bv[height<=%d]") % (height, height, height)
         afmt = "ba[ext=m4a]/ba[acodec^=mp4a]/bestaudio"
     vopts = dict(base_opts)
-    vopts.update({"format": vfmt, "outtmpl": vfile, "progress_hooks": [hook]})
+    # exact itag - no codec-name matching needed
+    vopts.update({"format": video_itag, "outtmpl": vfile, "progress_hooks": [hook]})
     aopts = dict(base_opts)
     aopts.update({"format": afmt, "outtmpl": afile, "progress_hooks": [hook]})
     _run_download(vopts, target, retry)
@@ -259,11 +273,11 @@ def download(url, page_url, format_id, outdir, cb):
         _run_download(opts, target, retry)
         return "done"
     elif format_id.startswith("__dashw__"):
-        height = int(format_id.split("__")[2])
-        return _download_dash(_base_opts(), target, outdir, height, cb, retry, mux="webm")
-    elif format_id.startswith("__dash__"):
-        height = int(format_id.split("__")[2])
-        return _download_dash(_base_opts(), target, outdir, height, cb, retry, mux="mp4")
+        video_itag = format_id.split("__")[2]
+        return _download_dash(_base_opts(), target, outdir, video_itag, cb, retry, mux="webm")
+    elif format_id.startswith("__dashm__"):
+        video_itag = format_id.split("__")[2]
+        return _download_dash(_base_opts(), target, outdir, video_itag, cb, retry, mux="mp4")
     else:
         opts["format"] = format_id
         _run_download(opts, target, retry)
