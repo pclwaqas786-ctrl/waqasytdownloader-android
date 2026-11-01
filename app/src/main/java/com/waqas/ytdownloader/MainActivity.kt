@@ -117,11 +117,19 @@ class MainActivity : Activity() {
         try {
             val outdir = File(cacheDir, "dl").apply { mkdirs() }
             outdir.listFiles()?.forEach { it.delete() }
-            Python.getInstance().getModule("ydl_helper").callAttr(
+            val result = Python.getInstance().getModule("ydl_helper").callAttr(
                 "download", url, pageUrl, f.id, outdir.absolutePath, ProgressCb(this)
-            )
-            val file = outdir.listFiles()?.firstOrNull { it.isFile }
-                ?: throw Exception("file nahi mili")
+            ).toString()
+            val file: File = if (result.startsWith("dash:")) {
+                val parts = result.removePrefix("dash:").split("|")
+                runOnUiThread { setStatus("Video+audio jor raha hun...") }
+                val merged = File(outdir, "video_${System.currentTimeMillis()}.mp4")
+                muxVideoAudio(parts[0], parts[1], merged.absolutePath)
+                merged
+            } else {
+                outdir.listFiles()?.firstOrNull { it.isFile }
+                    ?: throw Exception("file nahi mili")
+            }
             saveToDownloads(file)
             runOnUiThread { setStatus("Ho gaya! Downloads folder me dekh lo.") }
         } catch (e: Exception) {
@@ -186,6 +194,56 @@ class MainActivity : Activity() {
                 activity.findViewById<ProgressBar>(R.id.progress).progress =
                     ((done * 100) / total).toInt().coerceIn(0, 100)
             }
+        }
+    }
+
+    /** Join DASH video+audio parts into one MP4 using Android's built-in
+     *  MediaMuxer — no ffmpeg needed. */
+    private fun muxVideoAudio(videoPath: String, audioPath: String, outPath: String) {
+        val muxer = android.media.MediaMuxer(
+            outPath, android.media.MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        val vEx = android.media.MediaExtractor().apply { setDataSource(videoPath) }
+        val aEx = android.media.MediaExtractor().apply { setDataSource(audioPath) }
+        try {
+            val vTrack = findTrack(vEx, "video/")
+            val aTrack = findTrack(aEx, "audio/")
+            val vIdx = muxer.addTrack(vEx.getTrackFormat(vTrack))
+            val aIdx = muxer.addTrack(aEx.getTrackFormat(aTrack))
+            muxer.start()
+            vEx.selectTrack(vTrack)
+            aEx.selectTrack(aTrack)
+            copyTrack(vEx, muxer, vIdx)
+            copyTrack(aEx, muxer, aIdx)
+        } finally {
+            try { muxer.stop() } catch (_: Exception) {}
+            muxer.release()
+            vEx.release()
+            aEx.release()
+        }
+    }
+
+    private fun findTrack(ex: android.media.MediaExtractor, prefix: String): Int {
+        for (i in 0 until ex.trackCount) {
+            val mime = ex.getTrackFormat(i)
+                .getString(android.media.MediaFormat.KEY_MIME) ?: ""
+            if (mime.startsWith(prefix)) return i
+        }
+        throw Exception("track nahi mila: $prefix")
+    }
+
+    private fun copyTrack(
+        ex: android.media.MediaExtractor,
+        muxer: android.media.MediaMuxer,
+        idx: Int
+    ) {
+        val buf = java.nio.ByteBuffer.allocate(1024 * 1024)
+        val info = android.media.MediaCodec.BufferInfo()
+        while (true) {
+            val n = ex.readSampleData(buf, 0)
+            if (n < 0) break
+            info.set(0, n, ex.sampleTime, ex.sampleFlags)
+            muxer.writeSampleData(idx, buf, info)
+            ex.advance()
         }
     }
 }

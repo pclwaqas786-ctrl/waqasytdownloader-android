@@ -1,5 +1,7 @@
-"""yt-dlp helper, runs on-device via Chaquopy. No ffmpeg needed:
-video = best single-file (audio+video) mp4, audio = m4a direct."""
+"""yt-dlp helper, runs on-device via Chaquopy.
+video = best single-file (audio+video) mp4 when available;
+DASH fallback: best video-only + best audio joined on-device via Android
+MediaMuxer (no ffmpeg needed); audio = m4a direct."""
 import json
 import os
 import time
@@ -24,7 +26,7 @@ def _base_opts():
         "no_warnings": True,
         "noplaylist": True,
         "socket_timeout": 30,
-        "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
+        "extractor_args": {"youtube": {"player_client": ["android", "web", "tv_samsung", "web_safari"]}},
     }
 
 
@@ -55,6 +57,27 @@ def _extract_with_retry(ydl, url, attempts=3):
             if i < attempts - 1:
                 time.sleep(3)
     raise last
+
+
+def _dash_options(fmts, skip_upto=0):
+    """DASH fallback options: avc1/mp4 video-only heights joined on-device
+    with m4a audio via Android MediaMuxer. skip_upto: don't repeat heights
+    already offered as single-file."""
+    has_audio = any(
+        f.get("acodec") not in (None, "none")
+        and f.get("vcodec") in (None, "none")
+        and (f.get("ext") == "m4a" or (f.get("acodec") or "").startswith("mp4a"))
+        for f in fmts)
+    if not has_audio:
+        return []
+    heights = set()
+    for f in fmts:
+        h = f.get("height") or 0
+        if (h > skip_upto and (f.get("vcodec") or "").startswith("avc")
+                and f.get("acodec") in (None, "none") and f.get("ext") == "mp4"):
+            heights.add(h)
+    return [{"id": "__dash__%d" % h, "label": "%dp Video (HD)" % h}
+            for h in sorted(heights, reverse=True)[:4]]
 
 
 def fetch_info(url):
@@ -107,6 +130,10 @@ def fetch_info(url):
                 break
         if formats:
             formats.insert(0, {"id": formats[0]["id"], "label": "Best quality"})
+        # DASH fallback: separate video+audio joined on-device (YouTube is
+        # deprecating single-file streams; some videos/Shorts are DASH-only)
+        top_prog = max([f.get("height") or 0 for f in cands] or [0])
+        formats.extend(_dash_options(info.get("formats") or [], skip_upto=top_prog))
         formats.append({"id": "__audio__", "label": "Audio only (M4A)"})
 
     return json.dumps({
@@ -118,6 +145,54 @@ def fetch_info(url):
         "page_url": info.get("webpage_url") or url,
         "formats": formats,
     })
+
+
+def _run_download(ydl_opts, target, retry):
+    if retry:
+        last = None
+        for i in range(3):
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([target])
+                return
+            except Exception as e:
+                last = e
+                if i < 2:
+                    time.sleep(3)
+        raise last
+    else:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([target])
+
+
+def _download_dash(base_opts, target, outdir, height, cb, retry):
+    def hook(d):
+        if d.get("status") == "downloading":
+            try:
+                cb.onProgress(d.get("downloaded_bytes") or 0,
+                              d.get("total_bytes") or d.get("total_bytes_estimate") or 0)
+            except Exception:
+                pass
+
+    vfile = os.path.join(outdir, "video_part.mp4")
+    afile = os.path.join(outdir, "audio_part.m4a")
+    vopts = dict(base_opts)
+    vopts.update({
+        "format": ("bv*[vcodec^=avc][ext=mp4][height<=%d]/"
+                   "bv*[height<=%d][ext=mp4]/bv[height<=%d]") % (height, height, height),
+        "outtmpl": vfile,
+        "progress_hooks": [hook],
+    })
+    aopts = dict(base_opts)
+    aopts.update({
+        "format": "ba[ext=m4a]/ba[acodec^=mp4a]/bestaudio",
+        "outtmpl": afile,
+        "progress_hooks": [hook],
+    })
+    _run_download(vopts, target, retry)
+    _run_download(aopts, target, retry)
+    # Kotlin joins the two parts with Android MediaMuxer (no ffmpeg)
+    return "dash:%s|%s" % (vfile, afile)
 
 
 def download(url, page_url, format_id, outdir, cb):
@@ -135,25 +210,16 @@ def download(url, page_url, format_id, outdir, cb):
         "restrictfilenames": True,
         "progress_hooks": [hook],
     })
+    target = page_url or url
+    retry = _is_tiktok(target)
     if format_id == "__audio__":
         opts["format"] = "bestaudio[ext=m4a]/bestaudio/best"
+        _run_download(opts, target, retry)
+        return "done"
+    elif format_id.startswith("__dash__"):
+        height = int(format_id.split("__")[2])
+        return _download_dash(_base_opts(), target, outdir, height, cb, retry)
     else:
         opts["format"] = format_id
-    target = page_url or url
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        if _is_tiktok(target):
-            last = None
-            for i in range(3):
-                try:
-                    ydl.download([target])
-                    last = None
-                    break
-                except Exception as e:
-                    last = e
-                    if i < 2:
-                        time.sleep(3)
-            if last is not None:
-                raise last
-        else:
-            ydl.download([target])
-    return "done"
+        _run_download(opts, target, retry)
+        return "done"
