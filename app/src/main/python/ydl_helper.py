@@ -170,7 +170,13 @@ def fetch_info(url):
         # deprecating single-file streams; some videos/Shorts are DASH-only)
         top_prog = max([f.get("height") or 0 for f in cands] or [0])
         formats.extend(_dash_options(info.get("formats") or [], skip_upto=top_prog))
-        formats.append({"id": "__audio__", "label": "Audio only (M4A)"})
+        # "Audio only" sirf tab dikhao jab audio-only format waqai mojood ho -
+        # warna ye option chunne par download fail hona hi hai
+        has_aonly = any(f.get("vcodec") in (None, "none")
+                        and f.get("acodec") not in (None, "none")
+                        for f in (info.get("formats") or []))
+        if has_aonly:
+            formats.append({"id": "__audio__", "label": "Audio only (M4A)"})
 
     fmts_all = info.get("formats") or []
     n_prog = sum(1 for f in fmts_all
@@ -251,6 +257,17 @@ def _download_dash(base_opts, target, outdir, video_itag, cb, retry, mux="mp4"):
     return "mux:%s:%s|%s" % (mux, vfile, afile)
 
 
+def _android_only_opts():
+    """_base_opts() jaisa, lekin sirf YouTube Android client - 403 aane par
+    isi se naya download link lekar dobara try karte hain."""
+    o = _base_opts()
+    try:
+        o["extractor_args"]["youtube"]["player_client"] = ["android"]
+    except Exception:
+        pass
+    return o
+
+
 def download(url, page_url, format_id, outdir, cb):
     def hook(d):
         if d.get("status") == "downloading":
@@ -260,25 +277,40 @@ def download(url, page_url, format_id, outdir, cb):
             except Exception:
                 pass
 
-    opts = _base_opts()
-    opts.update({
-        "outtmpl": os.path.join(outdir, "%(title).80s.%(ext)s"),
-        "restrictfilenames": True,
-        "progress_hooks": [hook],
-    })
     target = page_url or url
-    retry = _is_tiktok(target)
-    if format_id == "__audio__":
-        opts["format"] = "bestaudio[ext=m4a]/bestaudio/best"
-        _run_download(opts, target, retry)
-        return "done"
-    elif format_id.startswith("__dashw__"):
-        video_itag = format_id.split("__")[2]
-        return _download_dash(_base_opts(), target, outdir, video_itag, cb, retry, mux="webm")
-    elif format_id.startswith("__dashm__"):
-        video_itag = format_id.split("__")[2]
-        return _download_dash(_base_opts(), target, outdir, video_itag, cb, retry, mux="mp4")
-    else:
-        opts["format"] = format_id
-        _run_download(opts, target, retry)
-        return "done"
+    last_err = None
+    # Retry loop: 403 (phone ke network/IP par YouTube ka download link
+    # block) -> sirf Android client se naya link lekar dobara try karo.
+    # 403 ke ilawa error foran dikhao, retry nahi.
+    for attempt in range(4):
+        base = _base_opts() if attempt == 0 else _android_only_opts()
+        opts = dict(base)
+        opts.update({
+            "outtmpl": os.path.join(outdir, "%(title).80s.%(ext)s"),
+            "restrictfilenames": True,
+            "progress_hooks": [hook],
+        })
+        try:
+            if format_id == "__audio__":
+                opts["format"] = "bestaudio[ext=m4a]/bestaudio/best"
+                _run_download(opts, target, 0)
+                return "done"
+            elif format_id.startswith("__dashw__"):
+                video_itag = format_id.split("__")[2]
+                return _download_dash(base, target, outdir, video_itag, cb, 0, mux="webm")
+            elif format_id.startswith("__dashm__"):
+                video_itag = format_id.split("__")[2]
+                return _download_dash(base, target, outdir, video_itag, cb, 0, mux="mp4")
+            else:
+                opts["format"] = format_id
+                _run_download(opts, target, 0)
+                return "done"
+        except Exception as e:
+            last_err = e
+            if "403" in str(e):
+                continue  # naya link lekar dobara
+            if _is_tiktok(target) and attempt < 3:
+                time.sleep(3)
+                continue
+            raise
+    raise last_err
